@@ -1,79 +1,68 @@
 package filter
 
-import "time"
+import (
+	. "github.com/mostlygeek/reaper/AWSResource"
+	"time"
+)
 
-type FilterableInstance interface {
-	Id() string
-	Region() string
-	State() string
-	Owned() bool
-	LaunchTime() time.Time
-	Tagged(string) bool
+type FilterFunc func(AWSResource) bool
 
-	ReaperVisible() bool
-	ReaperStarted() bool
-	ReaperNotified(int) bool
-	ReaperIgnored() bool
+func Owned(a AWSResource) bool    { return a.Owned }
+func NotOwned(a AWSResource) bool { return !a.Owned }
+
+func AutoScaled(a AWSResource) bool {
+	return a.Tagged("aws:autoscalang:groupName")
 }
-
-type FilterFunc func(FilterableInstance) bool
-
-func Owned(i FilterableInstance) bool    { return i.Owned() }
-func NotOwned(i FilterableInstance) bool { return !i.Owned() }
-
-func AutoScaled(i FilterableInstance) bool {
-	return i.Tagged("aws:autoscaling:groupName")
-}
-func NotAutoscaled(i FilterableInstance) bool { return !AutoScaled(i) }
+func NotAutoscaled(a AWSResource) bool { return !AutoScaled(a) }
 
 func Id(id string) FilterFunc {
-	return func(i FilterableInstance) bool {
-		return i.Id() == id
+	return func(a AWSResource) bool {
+		return a.Id == id
 	}
 }
 
 func Not(f FilterFunc) FilterFunc {
-	return func(i FilterableInstance) bool {
-		return !f(i)
+	return func(a AWSResource) bool {
+		return !f(a)
 	}
 }
 
 func Tagged(tag string) FilterFunc {
-	return func(i FilterableInstance) bool {
-		return i.Tagged(tag)
+	return func(a AWSResource) bool {
+		return a.Tagged(tag)
 	}
 }
 
 func LaunchTimeEqual(time time.Time) FilterFunc {
-	return func(i FilterableInstance) bool {
-		return i.LaunchTime().Equal(time)
+	return func(a AWSResource) bool {
+		return a.LaunchTime.Equal(time)
 	}
 }
 
 func LaunchTimeAfter(time time.Time) FilterFunc {
-	return func(i FilterableInstance) bool {
-		return i.LaunchTime().After(time)
+	return func(a AWSResource) bool {
+		return a.LaunchTime.After(time)
 	}
 }
 
 func LaunchTimeBefore(time time.Time) FilterFunc {
-	return func(i FilterableInstance) bool {
-		return i.LaunchTime().Before(time)
+	return func(a AWSResource) bool {
+		return a.LaunchTime.Before(time)
 	}
 }
 
-func Running(i FilterableInstance) bool {
-	return i.State() == "running"
+func Running(i AWSResource) bool {
+	return i.State == "running"
 }
 
 // ReaperReady creates a FilterFunc that checks if the instance is qualified
 // additional reaper work
 func ReaperReady(runningTime time.Duration) FilterFunc {
-	return func(i FilterableInstance) bool {
-		if i.ReaperStarted() {
-			return i.LaunchTime().Add(runningTime).Before(time.Now())
+	return func(i AWSResource) bool {
+		if i.ReaperStarted {
+			return i.LaunchTime.Add(runningTime).Before(time.Now())
 		} else {
-			return i.ReaperVisible()
+			return i.ReaperVisible
 		}
 	}
 }

@@ -210,6 +210,7 @@ func allInstances(regions []string) Instances {
 				resp, err := api.DescribeInstances(input)
 				if err != nil {
 					// probably should do something here...
+					reaper.log.Error(err)
 					return
 				}
 
