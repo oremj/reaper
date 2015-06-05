@@ -1,4 +1,4 @@
-package main
+package http
 
 import (
 	"io"
@@ -7,6 +7,9 @@ import (
 	"net/url"
 	"time"
 
+	"github.com/mostlygeek/reaper/aws"
+	"github.com/mostlygeek/reaper/config"
+	"github.com/mostlygeek/reaper/state"
 	"github.com/mostlygeek/reaper/token"
 )
 
@@ -16,7 +19,7 @@ const (
 )
 
 type HTTPApi struct {
-	conf   Config
+	conf   config.Config
 	server *http.Server
 	ln     net.Listener
 }
@@ -33,7 +36,6 @@ func (h *HTTPApi) Serve() (e error) {
 	mux.HandleFunc("/", processToken(h))
 	h.server = &http.Server{Handler: mux}
 
-	Log.Debug("Starting HTTP server: %s", h.conf.HTTPListen)
 	go h.server.Serve(h.ln)
 	return nil
 }
@@ -43,7 +45,7 @@ func (h *HTTPApi) Stop() (e error) {
 	return h.ln.Close()
 }
 
-func NewHTTPApi(c Config) *HTTPApi {
+func NewHTTPApi(c config.Config) *HTTPApi {
 	return &HTTPApi{conf: c}
 }
 
@@ -87,9 +89,8 @@ func processToken(h *HTTPApi) func(http.ResponseWriter, *http.Request) {
 
 		switch job.Action {
 		case token.J_DELAY:
-			Log.Debug("Delay request received for %s in region %s until %s", job.Id, job.Region, job.IgnoreUntil.String())
-			err := UpdateReaperState(job.Region, job.Id, &State{
-				State: STATE_IGNORE,
+			err := aws.UpdateReaperState(job.Region, job.Id, &state.State{
+				State: state.STATE_IGNORE,
 				Until: job.IgnoreUntil,
 			})
 
@@ -99,35 +100,30 @@ func processToken(h *HTTPApi) func(http.ResponseWriter, *http.Request) {
 			}
 
 		case token.J_TERMINATE:
-			Log.Debug("Terminate request received for %s in region %s.", job.Id, job.Region)
 			err := Terminate(job.Region, job.Id)
 			if err != nil {
 				writeResponse(w, http.StatusInternalServerError, err.Error())
 				return
 			}
 		case token.J_WHITELIST:
-			Log.Debug("Whitelist request received for %s in region %s", job.Id, job.Region)
 			err := Whitelist(job.Region, job.Id)
 			if err != nil {
 				writeResponse(w, http.StatusInternalServerError, err.Error())
 				return
 			}
 		case token.J_STOP:
-			Log.Debug("Stop request received for %s in region %s", job.Id, job.Region)
 			err := Stop(job.Region, job.Id)
 			if err != nil {
 				writeResponse(w, http.StatusInternalServerError, err.Error())
 				return
 			}
 		case token.J_FORCESTOP:
-			Log.Debug("Force Stop request received for %s in region %s", job.Id, job.Region)
 			err := ForceStop(job.Region, job.Id)
 			if err != nil {
 				writeResponse(w, http.StatusInternalServerError, err.Error())
 				return
 			}
 		default:
-			Log.Error("Unrecognized job token received.")
 			writeResponse(w, http.StatusInternalServerError, "Unrecognized job token.")
 			return
 		}
@@ -165,7 +161,6 @@ func MakeWhitelistLink(tokenSecret, apiUrl, region, id string) (string, error) {
 	whitelist, err := token.Tokenize(tokenSecret,
 		token.NewWhitelistJob(region, id))
 	if err != nil {
-		Log.Error("Error creating whitelist link: %s", err)
 		return "", err
 	}
 
@@ -176,7 +171,6 @@ func MakeStopLink(tokenSecret, apiUrl, region, id string) (string, error) {
 	stop, err := token.Tokenize(tokenSecret,
 		token.NewStopJob(region, id))
 	if err != nil {
-		Log.Error("Error creating ScaleToZero link: %s", err)
 		return "", err
 	}
 
@@ -187,7 +181,6 @@ func MakeForceStopLink(tokenSecret, apiUrl, region, id string) (string, error) {
 	stop, err := token.Tokenize(tokenSecret,
 		token.NewForceStopJob(region, id))
 	if err != nil {
-		Log.Error("Error creating ScaleToZero link: %s", err)
 		return "", err
 	}
 

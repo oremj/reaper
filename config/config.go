@@ -1,13 +1,14 @@
-package main
+package config
 
 import (
 	"fmt"
 	"net/mail"
 	"net/smtp"
-	"strconv"
 	"time"
 
 	"github.com/BurntSushi/toml"
+
+	"github.com/mostlygeek/reaper/filter"
 )
 
 func LoadConfig(path string) (*Config, error) {
@@ -72,33 +73,18 @@ type EventTypes struct {
 	Email   bool
 }
 
+type FilterTypes struct {
+	ASG      map[string]filter.Filter
+	Instance map[string]filter.Filter
+	Snapshot map[string]filter.Filter
+}
+
 type ResourceTypes struct {
 	AutoScalingGroups bool
 	Instances         bool
 	Snapshots         bool
 	Volumes           bool
 	SecurityGroups    bool
-}
-
-type FilterTypes struct {
-	ASG      map[string]Filter
-	Instance map[string]Filter
-	Snapshot map[string]Filter
-}
-
-type Filter struct {
-	Function string
-	Value    string
-}
-
-func (f *Filter) Int64Value() (int64, error) {
-	// parseint -> base 10, 64 bit int
-	i, err := strconv.ParseInt(f.Value, 10, 64)
-	if err != nil {
-		Log.Error("could not parse %s as int64", f.Value)
-		return 0, err
-	}
-	return i, nil
 }
 
 type FromAddress struct {

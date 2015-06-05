@@ -1,4 +1,4 @@
-package main
+package aws
 
 import (
 	"fmt"
@@ -8,12 +8,9 @@ import (
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/ec2"
-)
 
-const (
-	reaper_tag = "REAPER"
-	s_sep      = "|"
-	s_tformat  = "2006-01-02 03:04PM MST"
+	"github.com/mostlygeek/reaper/filter"
+	"github.com/mostlygeek/reaper/state"
 )
 
 type Instance struct {
@@ -58,7 +55,7 @@ func NewInstance(region string, instance *ec2.Instance) *Instance {
 	}
 
 	i.name = i.Tag("Name")
-	i.reaper = ParseState(i.tags[reaper_tag])
+	i.reaper = state.ParseState(i.tags[state.ReaperTag])
 
 	return &i
 }
@@ -67,7 +64,6 @@ func (i *Instance) AWSConsoleURL() *url.URL {
 	url, err := url.Parse(fmt.Sprintf("https://%s.console.aws.amazon.com/ec2/v2/home?region=%s#Instances:instanceId=%s",
 		i.region, i.region, i.id))
 	if err != nil {
-		Log.Error(fmt.Sprintf("Error generating AWSConsoleURL. %s", err))
 	}
 	return url
 }
@@ -77,14 +73,14 @@ func (i *Instance) LaunchTime() time.Time { return i.launchTime }
 // Autoscaled checks if the instance is part of an autoscaling group
 func (i *Instance) AutoScaled() (ok bool) { return i.Tagged("aws:autoscaling:groupName") }
 
-func (i *Instance) Filter(filter Filter) bool {
+func (i *Instance) Filter(filter filter.Filter) bool {
 	matched := false
 	// map function names to function calls
 	switch filter.Function {
 	case "Running":
 		b, err := strconv.ParseBool(filter.Value)
 		if err != nil {
-			Log.Error("could not parse %s as bool", filter.Value)
+
 		}
 		if i.Running() == b {
 			matched = true
@@ -94,7 +90,6 @@ func (i *Instance) Filter(filter Filter) bool {
 			matched = true
 		}
 	default:
-		Log.Error("No function %s could be found for filtering ASGs.", filter.Function)
 	}
 	return matched
 }

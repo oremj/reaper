@@ -1,4 +1,4 @@
-package main
+package state
 
 import (
 	"strings"
@@ -10,6 +10,9 @@ const (
 	STATE_NOTIFY1
 	STATE_NOTIFY2
 	STATE_IGNORE
+	ReaperTag     = "REAPER"
+	TagSeparator  = "|"
+	TagTimeFormat = "2006-01-02 03:04PM MST"
 )
 
 type StateEnum int
@@ -35,7 +38,7 @@ type State struct {
 }
 
 func (s *State) String() string {
-	return s.State.String() + s_sep + s.Until.Format(s_tformat)
+	return s.State.String() + TagSeparator + s.Until.Format(TagTimeFormat)
 }
 
 func ParseState(state string) (defaultState *State) {
@@ -46,7 +49,7 @@ func ParseState(state string) (defaultState *State) {
 		return
 	}
 
-	s := strings.Split(state, s_sep)
+	s := strings.Split(state, TagSeparator)
 
 	if len(s) != 2 {
 		return
@@ -66,7 +69,7 @@ func ParseState(state string) (defaultState *State) {
 		return
 	}
 
-	t, err := time.Parse(s_tformat, s[1])
+	t, err := time.Parse(TagTimeFormat, s[1])
 	if err != nil {
 		return
 	}

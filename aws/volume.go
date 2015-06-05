@@ -1,4 +1,4 @@
-package main
+package aws
 
 import (
 	"github.com/aws/aws-sdk-go/service/ec2"
@@ -32,7 +32,6 @@ func NewVolume(region string, v *ec2.Volume) *Volume {
 	}
 
 	// TODO: state
-	Log.Info("Volume state: %s", *v.State)
 
 	return &vol
 }

@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/signal"
 
+	"github.com/mostlygeek/reaper/events"
 	"github.com/op/go-logging"
 )
 
@@ -13,7 +14,7 @@ import (
 
 var (
 	Log       *logging.Logger
-	Events    []EventReporter
+	Events    []events.EventReporter
 	Reapables map[string]map[string]Reapable
 	Conf      *Config
 	mailer    *Mailer

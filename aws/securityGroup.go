@@ -1,7 +1,9 @@
-package main
+package aws
 
 import (
 	"github.com/aws/aws-sdk-go/service/ec2"
+
+	"github.com/mostlygeek/reaper/state"
 )
 
 type SecurityGroups []*SecurityGroup
@@ -26,7 +28,7 @@ func NewSecurityGroup(region string, sg *ec2.SecurityGroup) *SecurityGroup {
 		s.tags[*tag.Key] = *tag.Value
 	}
 
-	s.reaper = ParseState(s.tags[reaper_tag])
+	s.reaper = state.ParseState(s.tags[state.ReaperTag])
 
 	return &s
 }

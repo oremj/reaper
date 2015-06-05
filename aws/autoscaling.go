@@ -1,4 +1,4 @@
-package main
+package aws
 
 import (
 	"fmt"
@@ -7,6 +7,9 @@ import (
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/autoscaling"
+
+	"github.com/mostlygeek/reaper/filter"
+	"github.com/mostlygeek/reaper/state"
 )
 
 type AutoScalingGroup struct {
@@ -30,7 +33,7 @@ func NewAutoScalingGroup(region string, asg *autoscaling.Group) *AutoScalingGrou
 			name:   *asg.AutoScalingGroupName,
 			region: region,
 			tags:   make(map[string]string),
-			reaper: ParseState(""),
+			reaper: state.ParseState(""),
 		},
 		autoScalingGroupARN: *asg.AutoScalingGroupARN,
 		createdTime:         *asg.CreatedTime,
@@ -71,7 +74,7 @@ func (a *AutoScalingGroup) SizeGreaterThan(size int64) bool {
 	return a.size <= size
 }
 
-func (a *AutoScalingGroup) Filter(filter Filter) bool {
+func (a *AutoScalingGroup) Filter(filter filter.Filter) bool {
 	matched := false
 	// map function names to function calls
 	switch filter.Function {
@@ -100,7 +103,6 @@ func (a *AutoScalingGroup) Filter(filter Filter) bool {
 			matched = true
 		}
 	default:
-		Log.Error("No function %s could be found for filtering ASGs.", filter.Function)
 	}
 	return matched
 }
@@ -109,20 +111,18 @@ func (a *AutoScalingGroup) AWSConsoleURL() *url.URL {
 	url, err := url.Parse(fmt.Sprintf("https://%s.console.aws.amazon.com/ec2/autoscaling/home?region=%s#AutoScalingGroups:id=%s",
 		a.Region(), a.Region(), a.Id()))
 	if err != nil {
-		Log.Error(fmt.Sprintf("Error generating AWSConsoleURL. %s", err))
+
 	}
 	return url
 }
 
 // TODO
 func (a *AutoScalingGroup) Terminate() (bool, error) {
-	Log.Debug("Terminating ASG %s in region %s.", a.id, a.region)
 	return false, nil
 }
 
 // stopping an ASG == scaling it to 0
 func (a *AutoScalingGroup) Stop() (bool, error) {
-	Log.Debug("Stopping ASG %s in region %s", a.Id(), a.Region())
 	as := autoscaling.New(&aws.Config{Region: a.Region()})
 
 	// TODO: fix this nonsense
@@ -134,7 +134,6 @@ func (a *AutoScalingGroup) Stop() (bool, error) {
 	}
 	_, err := as.SetDesiredCapacity(input)
 	if err != nil {
-		Log.Error("could not set desired capacity to 0 for ASG %s in region %s", a.Id(), a.Region())
 		return false, err
 	}
 	return true, nil
@@ -142,7 +141,6 @@ func (a *AutoScalingGroup) Stop() (bool, error) {
 
 // stopping an ASG == scaling it to 0
 func (a *AutoScalingGroup) ForceStop() (bool, error) {
-	Log.Debug("Force Stopping ASG %s in region %s", a.Id(), a.Region())
 	as := autoscaling.New(&aws.Config{Region: a.Region()})
 
 	// TODO: fix this nonsense
@@ -155,7 +153,6 @@ func (a *AutoScalingGroup) ForceStop() (bool, error) {
 	}
 	_, err := as.UpdateAutoScalingGroup(input)
 	if err != nil {
-		Log.Error("could not set DesiredCapacity, MinSize to 0 for ASG %s in region %s", a.Id(), a.Region())
 		return false, err
 	}
 	return true, nil

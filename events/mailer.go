@@ -1,4 +1,4 @@
-package main
+package events
 
 import (
 	"bytes"
@@ -7,6 +7,8 @@ import (
 	"net/mail"
 	"net/smtp"
 	"time"
+
+	"github.com/mostlygeek/reaper/config"
 )
 
 // at some point this should probably be configurable
@@ -47,10 +49,10 @@ func init() {
 }
 
 type Mailer struct {
-	conf Config
+	conf config.Config
 }
 
-func NewMailer(conf Config) *Mailer {
+func NewMailer(conf config.Config) *Mailer {
 	return &Mailer{conf}
 }
 

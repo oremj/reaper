@@ -1,13 +1,14 @@
-package main
+package aws
 
 import (
 	"fmt"
 	"net/mail"
-	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/ec2"
+
+	"github.com/mostlygeek/reaper/state"
 )
 
 type Terminable interface {
@@ -53,18 +54,6 @@ const (
 	STOPPED
 )
 
-type Filterable interface {
-	Filter(Filter) bool
-}
-
-func PrintFilters(filters map[string]Filter) string {
-	var filterText []string
-	for _, filter := range filters {
-		filterText = append(filterText, fmt.Sprintf("%s(%s)", filter.Function, filter.Value))
-	}
-	return strings.Join(filterText, ", ")
-}
-
 // basic AWS resource, has properties that most/all resources have
 type AWSResource struct {
 	id          string
@@ -78,7 +67,7 @@ type AWSResource struct {
 	tags map[string]string
 
 	// reaper state
-	reaper *State
+	reaper *state.State
 }
 
 func (a *AWSResource) Tagged(tag string) bool {
@@ -90,7 +79,7 @@ func (a *AWSResource) Id() string           { return a.id }
 func (a *AWSResource) Name() string         { return a.name }
 func (a *AWSResource) Region() string       { return a.region }
 func (a *AWSResource) State() ResourceState { return a.state }
-func (a *AWSResource) Reaper() *State       { return a.reaper }
+func (a *AWSResource) Reaper() *state.State { return a.reaper }
 
 // filter funcs for ResourceState
 func (a *AWSResource) Pending() bool      { return a.state == PENDING }
@@ -121,37 +110,36 @@ func (a *AWSResource) Owner() *mail.Address {
 	return nil
 }
 
-func (a *AWSResource) UpdateReaperState(s *State) {
+func (a *AWSResource) UpdateReaperState(s *state.State) {
 	a.reaper = s
 }
 func (a *AWSResource) ReaperVisible() bool {
 	return time.Now().After(a.reaper.Until)
 }
 func (a *AWSResource) ReaperStarted() bool {
-	return a.reaper.State == STATE_START
+	return a.reaper.State == state.STATE_START
 }
 func (a *AWSResource) ReaperNotified(notifyNum int) bool {
 	if notifyNum == 1 {
-		return a.reaper.State == STATE_NOTIFY1
+		return a.reaper.State == state.STATE_NOTIFY1
 	} else if notifyNum == 2 {
-		return a.reaper.State == STATE_NOTIFY2
+		return a.reaper.State == state.STATE_NOTIFY2
 	} else {
 		return false
 	}
 }
 
 func (a *AWSResource) ReaperIgnored() bool {
-	return a.reaper.State == STATE_IGNORE
+	return a.reaper.State == state.STATE_IGNORE
 }
 
-func UpdateReaperState(region, id string, newState *State) error {
-	Log.Info("UpdateReaperState region:%s instance: %s", region, id)
+func UpdateReaperState(region, id string, newState *state.State) error {
 	req := &ec2.CreateTagsInput{
 		DryRun:    aws.Boolean(false),
 		Resources: []*string{aws.String(id)},
 		Tags: []*ec2.Tag{
 			&ec2.Tag{
-				Key:   aws.String(reaper_tag),
+				Key:   aws.String(state.ReaperTag),
 				Value: aws.String(newState.String()),
 			},
 		},
