@@ -9,46 +9,70 @@ import (
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/autoscaling"
 	"github.com/aws/aws-sdk-go/service/ec2"
+	"github.com/mostlygeek/reaper/events"
 )
 
 // Reaper finds resources and deals with them
 type Reaper struct {
 	conf   Config
-	stopCh chan struct{}
+	errCh  chan error
+	infoCh chan string
+	runCh  chan bool
 }
 
 // NewReaper is a Reaper constructor shorthand
 func NewReaper(c Config) *Reaper {
 	return &Reaper{
-		conf: c,
+		conf:   c,
+		errCh:  make(chan error),
+		infoCh: make(chan string),
+		runCh:  make(chan bool),
 	}
 }
 
 // Start begins Reaper execution in a new goroutine
 func (r *Reaper) Start() {
-	if r.stopCh != nil {
-		return
-	}
-	r.stopCh = make(chan struct{})
-	go r.start()
+	r.start()
 }
 
 // Stop closes a Reaper's stop channel
 func (r *Reaper) Stop() {
-	close(r.stopCh)
+	r.runCh <- false
 }
 
 // unexported start is continuous loop that reaps every
 // time interval
 func (r *Reaper) start() {
-	// make a list of all eligible instances
+	// Log.Info("We started")
+	// this needs to be a goroutine
+	// race conditions?!
+	go func() {
+		r.runCh <- true
+	}()
 	for {
-		r.Once()
+		// Log.Info("We forin'")
 		select {
 		case <-time.After(r.conf.Reaper.Interval.Duration):
-		case <-r.stopCh: // time to exit!
-			Log.Debug("Stopping reaper on stop channel message")
-			return
+			r.runCh <- true
+		case run := <-r.runCh:
+			// Log.Info("Running reaper ;)")
+			if run {
+				// run reaper
+				go r.Once()
+			} else {
+				// exit!
+				Log.Debug("Stopping reaper on runCh receiving false")
+				close(r.runCh)
+				return
+			}
+		case err := <-r.errCh:
+			if err != nil {
+				Log.Error("%s", err.Error())
+			}
+		case info := <-r.infoCh:
+			Log.Info("%s", info)
+		case <-time.After(time.Second * 1):
+			r.infoCh <- "heartbeat"
 		}
 	}
 }
@@ -92,9 +116,9 @@ func (r *Reaper) SaveState(stateFile string) {
 	s, err := os.OpenFile(Conf.StateFile, os.O_RDWR|os.O_TRUNC|os.O_CREATE, 0664)
 	defer func() { s.Close() }()
 	if err != nil {
-		Log.Error("Unable to create StateFile '%s'", Conf.StateFile)
+		r.errCh <- fmt.Errorf("Unable to create StateFile '%s'", Conf.StateFile)
 	} else {
-		Log.Info("States will be saved to %s", Conf.StateFile)
+		r.infoCh <- fmt.Sprintf("States will be saved to %s", Conf.StateFile)
 	}
 	// save state to state file
 	for region := range Reapables {
@@ -121,7 +145,7 @@ func allASGInstanceIds(as []AutoScalingGroup) map[string]map[string]bool {
 }
 
 // returns ASGs as filterables
-func allAutoScalingGroups() []Filterable {
+func allAutoScalingGroups(errc chan error, infoc chan string) []Filterable {
 	regions := Conf.AWS.Regions
 
 	// waitgroup for goroutines
@@ -144,8 +168,7 @@ func allAutoScalingGroups() []Filterable {
 			input := &autoscaling.DescribeAutoScalingGroupsInput{}
 			resp, err := api.DescribeAutoScalingGroups(input)
 			if err != nil {
-				// TODO: wee
-				Log.Error(err.Error())
+				errc <- err
 			}
 
 			for _, a := range resp.AutoScalingGroups {
@@ -153,16 +176,11 @@ func allAutoScalingGroups() []Filterable {
 				in <- NewAutoScalingGroup(region, a)
 			}
 
-			Log.Info(fmt.Sprintf("Found %d total AutoScalingGroups in %s", sum, region))
-			errChan := make(chan error)
+			infoc <- fmt.Sprintf("Found %d total AutoScalingGroups in %s", sum, region)
 			for _, e := range Events {
-				go func(c chan error) {
+				go func(c chan error, e events.EventReporter) {
 					c <- e.NewStatistic("reaper.asgs.total", float64(len(in)), []string{fmt.Sprintf("region:%s", region)})
-				}(errChan)
-			}
-			<-errChan
-			for err := range errChan {
-				Log.Error("%s", err.Error())
+				}(errc, e)
 			}
 		}(region)
 	}
@@ -180,7 +198,7 @@ func allAutoScalingGroups() []Filterable {
 	// done with the channel
 	close(in)
 
-	Log.Info("Found %d total ASGs.", len(autoScalingGroups))
+	infoc <- fmt.Sprintf("Found %d total ASGs.", len(autoScalingGroups))
 	return autoScalingGroups
 }
 
@@ -248,7 +266,7 @@ func allSnapshots() []Filterable {
 
 func (r *Reaper) reapVolumes(done chan bool) {
 	volumes := allVolumes()
-	Log.Info(fmt.Sprintf("Total volumes: %d", len(volumes)))
+	r.infoCh <- fmt.Sprintf("Total volumes: %d", len(volumes))
 	for _, e := range Events {
 		e.NewStatistic("reaper.volumes.total", float64(len(volumes)), nil)
 	}
@@ -310,7 +328,7 @@ func allVolumes() Volumes {
 
 func (r *Reaper) reapSecurityGroups(done chan bool) {
 	securitygroups := allSecurityGroups()
-	Log.Info(fmt.Sprintf("Total security groups: %d", len(securitygroups)))
+	r.infoCh <- fmt.Sprintf("Total security groups: %d", len(securitygroups))
 	for _, e := range Events {
 		go e.NewStatistic("reaper.securitygroups.total", float64(len(securitygroups)), nil)
 	}
@@ -371,7 +389,7 @@ func allSecurityGroups() SecurityGroups {
 }
 
 func (r *Reaper) reap(done chan bool) {
-	filterables := allFilterables()
+	filterables := allFilterables(r.errCh, r.infoCh)
 	// TODO: consider slice of pointers
 	var asgs []AutoScalingGroup
 	for _, f := range filterables {
@@ -384,7 +402,7 @@ func (r *Reaper) reap(done chan bool) {
 		case *Snapshot:
 			reapSnapshot(t)
 		default:
-			Log.Error("Reap default case.")
+			r.errCh <- fmt.Errorf("Reap found unhandleable type.")
 		}
 	}
 
@@ -403,13 +421,13 @@ func (r *Reaper) reap(done chan bool) {
 
 // makes a slice of all filterables by appending
 // output of each filterable types aggregator function
-func allFilterables() []Filterable {
+func allFilterables(errc chan error, infoc chan string) []Filterable {
 	var filterables []Filterable
 	if Conf.Enabled.Instances {
-		filterables = append(filterables, allInstances()...)
+		filterables = append(filterables, allInstances(errc, infoc)...)
 	}
 	if Conf.Enabled.AutoScalingGroups {
-		filterables = append(filterables, allAutoScalingGroups()...)
+		filterables = append(filterables, allAutoScalingGroups(errc, infoc)...)
 	}
 	if Conf.Enabled.Snapshots {
 		filterables = append(filterables, allSnapshots()...)
@@ -602,7 +620,7 @@ func Stop(region, id string) error {
 // allInstances describes every instance in the requested regions
 // instances of Instance are created for each *ec2.Instance
 // returned as Filterables
-func allInstances() []Filterable {
+func allInstances(errc chan error, infoc chan string) []Filterable {
 
 	regions := Conf.AWS.Regions
 	var wg sync.WaitGroup
@@ -610,10 +628,9 @@ func allInstances() []Filterable {
 
 	// fetch all info in parallel
 	for _, region := range regions {
-		// Log.Debug("DescribeInstances in %s", region)
 		wg.Add(1)
 
-		go func(region string) {
+		go func(region string, errc chan error, infoc chan string) {
 			defer wg.Done()
 			api := ec2.New(&aws.Config{Region: region})
 
@@ -633,7 +650,7 @@ func allInstances() []Filterable {
 				resp, err := api.DescribeInstances(input)
 				if err != nil {
 					// probably should do something here...
-					Log.Debug("EC2 error in %s: %s", region, err.Error())
+					errc <- fmt.Errorf("EC2 error in %s: %s", region, err.Error())
 					return
 				}
 
@@ -645,18 +662,20 @@ func allInstances() []Filterable {
 				}
 
 				if resp.NextToken != nil {
-					Log.Debug("More results for DescribeInstances in %s", region)
+					infoc <- fmt.Sprintf("More results for DescribeInstances in %s", region)
 					nextToken = resp.NextToken
 				} else {
 					done = true
 				}
 			}
 
-			Log.Info("Found %d total instances in %s", sum, region)
+			infoc <- fmt.Sprintf("Found %d total instances in %s", sum, region)
 			for _, e := range Events {
-				go e.NewStatistic("reaper.instances.total", float64(sum), []string{fmt.Sprintf("region:%s", region)})
+				go func(c chan error, e events.EventReporter) {
+					c <- e.NewStatistic("reaper.instances.total", float64(sum), []string{fmt.Sprintf("region:%s", region)})
+				}(errc, e)
 			}
-		}(region)
+		}(region, errc, infoc)
 	}
 
 	var list []Filterable
@@ -672,6 +691,6 @@ func allInstances() []Filterable {
 	wg.Wait()
 	close(in)
 
-	Log.Info("Found %d total instances.", len(list))
+	infoc <- fmt.Sprintf("Found %d total instances.", len(list))
 	return list
 }
