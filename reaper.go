@@ -29,6 +29,7 @@ type reaperChannels struct {
 // NewReaper is a Reaper constructor shorthand
 func NewReaper(c Config) *Reaper {
 	return &Reaper{
+		// channels
 		// these are buffered because... why not?
 		reaperChannels{
 			errCh:    make(chan error, 5),
@@ -37,6 +38,7 @@ func NewReaper(c Config) *Reaper {
 			debugCh:  make(chan string, 5),
 			noticeCh: make(chan string, 5),
 		},
+		// config
 		c,
 	}
 }
@@ -215,12 +217,12 @@ func allAutoScalingGroups(cs reaperChannels) []Filterable {
 }
 
 func (r *Reaper) reapSnapshots(done chan bool) {
-	snapshots := allSnapshots()
+	snapshots := allSnapshots(r.reaperChannels)
 	r.infoCh <- (fmt.Sprintf("Total snapshots: %d", len(snapshots)))
 	done <- true
 }
 
-func allSnapshots() []Filterable {
+func allSnapshots(cs reaperChannels) []Filterable {
 	regions := Conf.AWS.Regions
 
 	// waitgroup for goroutines
@@ -251,7 +253,7 @@ func allSnapshots() []Filterable {
 				in <- NewSnapshot(region, v)
 			}
 
-			Log.Info(fmt.Sprintf("Found %d total snapshots in %s", sum, region))
+			cs.infoCh <- fmt.Sprintf("Found %d total snapshots in %s", sum, region)
 			for _, e := range Events {
 				go e.NewStatistic("reaper.snapshots.total", float64(len(in)), []string{fmt.Sprintf("region:%s", region)})
 			}
@@ -272,20 +274,22 @@ func allSnapshots() []Filterable {
 	// done with the channel
 	close(in)
 
-	Log.Info("Found %d total snapshots.", len(snapshots))
+	cs.infoCh <- fmt.Sprintf("Found %d total snapshots.", len(snapshots))
 	return snapshots
 }
 
 func (r *Reaper) reapVolumes(done chan bool) {
-	volumes := allVolumes()
+	volumes := allVolumes(r.reaperChannels)
 	r.infoCh <- fmt.Sprintf("Total volumes: %d", len(volumes))
 	for _, e := range Events {
-		e.NewStatistic("reaper.volumes.total", float64(len(volumes)), nil)
+		go func(cs reaperChannels, e events.EventReporter) {
+			cs.errCh <- e.NewStatistic("reaper.volumes.total", float64(len(volumes)), nil)
+		}(r.reaperChannels, e)
 	}
 	done <- true
 }
 
-func allVolumes() Volumes {
+func allVolumes(cs reaperChannels) Volumes {
 	regions := Conf.AWS.Regions
 
 	// waitgroup for goroutines
@@ -300,7 +304,7 @@ func allVolumes() Volumes {
 		sum := 0
 
 		// goroutine per region to fetch all security groups
-		go func(region string) {
+		go func(region string, cs reaperChannels) {
 			defer wg.Done()
 			api := ec2.New(&aws.Config{Region: region})
 
@@ -316,8 +320,8 @@ func allVolumes() Volumes {
 				in <- NewVolume(region, v)
 			}
 
-			Log.Info(fmt.Sprintf("Found %d total volumes in %s", sum, region))
-		}(region)
+			cs.infoCh <- fmt.Sprintf("Found %d total volumes in %s", sum, region)
+		}(region, cs)
 	}
 	// aggregate
 	var volumes Volumes
@@ -334,20 +338,22 @@ func allVolumes() Volumes {
 	// done with the channel
 	close(in)
 
-	Log.Info("Found %d total snapshots.", len(volumes))
+	cs.infoCh <- fmt.Sprintf("Found %d total snapshots.", len(volumes))
 	return volumes
 }
 
 func (r *Reaper) reapSecurityGroups(done chan bool) {
-	securitygroups := allSecurityGroups()
+	securitygroups := allSecurityGroups(r.reaperChannels)
 	r.infoCh <- fmt.Sprintf("Total security groups: %d", len(securitygroups))
 	for _, e := range Events {
-		go e.NewStatistic("reaper.securitygroups.total", float64(len(securitygroups)), nil)
+		go func(cs reaperChannels, e events.EventReporter) {
+			cs.errCh <- e.NewStatistic("reaper.securitygroups.total", float64(len(securitygroups)), nil)
+		}(r.reaperChannels, e)
 	}
 	done <- true
 }
 
-func allSecurityGroups() SecurityGroups {
+func allSecurityGroups(cs reaperChannels) SecurityGroups {
 	regions := Conf.AWS.Regions
 
 	// waitgroup for goroutines
@@ -362,7 +368,7 @@ func allSecurityGroups() SecurityGroups {
 		sum := 0
 
 		// goroutine per region to fetch all security groups
-		go func(region string) {
+		go func(region string, cs reaperChannels) {
 			defer wg.Done()
 			api := ec2.New(&aws.Config{Region: region})
 
@@ -378,8 +384,8 @@ func allSecurityGroups() SecurityGroups {
 				in <- NewSecurityGroup(region, sg)
 			}
 
-			Log.Info(fmt.Sprintf("Found %d total security groups in %s", sum, region))
-		}(region)
+			cs.infoCh <- fmt.Sprintf("Found %d total security groups in %s", sum, region)
+		}(region, cs)
 	}
 	// aggregate
 	var securityGroups SecurityGroups
@@ -396,7 +402,7 @@ func allSecurityGroups() SecurityGroups {
 	// done with the channel
 	close(in)
 
-	Log.Info("Found %d total security groups.", len(securityGroups))
+	cs.infoCh <- fmt.Sprintf("Found %d total security groups.", len(securityGroups))
 	return securityGroups
 }
 
@@ -442,7 +448,7 @@ func allFilterables(cs reaperChannels) []Filterable {
 		filterables = append(filterables, allAutoScalingGroups(cs)...)
 	}
 	if Conf.Enabled.Snapshots {
-		filterables = append(filterables, allSnapshots()...)
+		filterables = append(filterables, allSnapshots(cs)...)
 	}
 	return filterables
 }
@@ -480,13 +486,9 @@ func applyFilters(f Filterable, filters map[string]Filter, cs reaperChannels) bo
 func reapSnapshot(s *Snapshot, cs reaperChannels) {
 	filters := Conf.Filters.Snapshot
 	if applyFilters(s, filters, cs) {
-		Log.Debug(fmt.Sprintf("Snapshot %s matched %s.",
+		cs.debugCh <- fmt.Sprintf("Snapshot %s matched %s.",
 			s.ID,
-			PrintFilters(filters)))
-		// TODO
-		// for _, e := range Events {
-		// e.NewReapableSnapshotEvent(s)
-		// }
+			PrintFilters(filters))
 	}
 }
 
@@ -504,8 +506,10 @@ func reapInstance(i *Instance, cs reaperChannels) {
 			PrintFilters(filters)))
 
 		for _, e := range Events {
-			go e.NewEvent("Reapable instance discovered", string(i.ReapableEventText().Bytes()), nil, nil)
-			go e.NewStatistic("reaper.instances.reapable", 1, []string{fmt.Sprintf("id:%s", i.ID)})
+			go func(cs reaperChannels, e events.EventReporter) {
+				cs.errCh <- e.NewEvent("Reapable instance discovered", string(i.ReapableEventText().Bytes()), nil, nil)
+				cs.errCh <- e.NewStatistic("reaper.instances.reapable", 1, []string{fmt.Sprintf("id:%s", i.ID)})
+			}(cs, e)
 		}
 
 		// add to Reapables
@@ -515,21 +519,10 @@ func reapInstance(i *Instance, cs reaperChannels) {
 		// sends different notification based on reaper state
 		// currently there is a conifg option to enable these: Conf.Notifications.Extras
 		if i.Owned() && Conf.Notifications.Extras {
-			switch i.reaperState.State {
-			case STATE_START:
-				for _, e := range Events {
-					go e.NewEvent("Reaper sent notification 1", fmt.Sprintf("Notification 1 sent to %s for instance %s.", i.Owner(), i.ID), nil, nil)
-				}
-
-			case STATE_NOTIFY1:
-				for _, e := range Events {
-					go e.NewEvent("Reaper sent notification 2", fmt.Sprintf("Notification 2 sent to %s for instance %s.", i.Owner(), i.ID), nil, nil)
-				}
-
-			case STATE_NOTIFY2:
-				for _, e := range Events {
-					go e.NewEvent("Reaper terminated instance", fmt.Sprintf("Instance owned by %s with id: %s was terminated.", i.Owner(), i.ID), nil, nil)
-				}
+			for _, e := range Events {
+				go func(cs reaperChannels, e events.EventReporter) {
+					cs.errCh <- e.NewEvent("Reaper sent notification %d", fmt.Sprintf("Notification %d sent to %s for instance %s.", i.reaperState.State, i.Owner(), i.ID), nil, nil)
+				}(cs, e)
 			}
 		}
 	}
