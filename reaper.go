@@ -14,19 +14,30 @@ import (
 
 // Reaper finds resources and deals with them
 type Reaper struct {
-	conf   Config
-	errCh  chan error
-	infoCh chan string
-	runCh  chan bool
+	reaperChannels
+	conf Config
+}
+
+type reaperChannels struct {
+	runCh    chan bool
+	errCh    chan error
+	infoCh   chan string
+	debugCh  chan string
+	noticeCh chan string
 }
 
 // NewReaper is a Reaper constructor shorthand
 func NewReaper(c Config) *Reaper {
 	return &Reaper{
-		conf:   c,
-		errCh:  make(chan error),
-		infoCh: make(chan string),
-		runCh:  make(chan bool),
+		// these are buffered because... why not?
+		reaperChannels{
+			errCh:    make(chan error, 5),
+			infoCh:   make(chan string, 5),
+			runCh:    make(chan bool, 5),
+			debugCh:  make(chan string, 5),
+			noticeCh: make(chan string, 5),
+		},
+		c,
 	}
 }
 
@@ -43,25 +54,22 @@ func (r *Reaper) Stop() {
 // unexported start is continuous loop that reaps every
 // time interval
 func (r *Reaper) start() {
-	// Log.Info("We started")
 	// this needs to be a goroutine
 	// race conditions?!
 	go func() {
 		r.runCh <- true
 	}()
 	for {
-		// Log.Info("We forin'")
 		select {
 		case <-time.After(r.conf.Reaper.Interval.Duration):
 			r.runCh <- true
 		case run := <-r.runCh:
-			// Log.Info("Running reaper ;)")
 			if run {
 				// run reaper
 				go r.Once()
 			} else {
 				// exit!
-				Log.Debug("Stopping reaper on runCh receiving false")
+				r.debugCh <- "Stopping reaper on runCh receiving false"
 				close(r.runCh)
 				return
 			}
@@ -70,9 +78,13 @@ func (r *Reaper) start() {
 				Log.Error("%s", err.Error())
 			}
 		case info := <-r.infoCh:
-			Log.Info("%s", info)
-		case <-time.After(time.Second * 1):
-			r.infoCh <- "heartbeat"
+			Log.Info("Reaper: %s", info)
+		case debug := <-r.debugCh:
+			Log.Debug("Reaper: %s", debug)
+		case notice := <-r.noticeCh:
+			Log.Notice("Reaper: %s", notice)
+		case <-time.After(time.Minute * 5):
+			r.infoCh <- "reaper heartbeat"
 		}
 	}
 }
@@ -108,7 +120,7 @@ func (r *Reaper) Once() {
 		r.SaveState(Conf.StateFile)
 	}
 
-	Log.Notice("Sleeping for %s", r.conf.Reaper.Interval.Duration.String())
+	r.noticeCh <- fmt.Sprintf("Sleeping for %s", r.conf.Reaper.Interval.Duration.String())
 }
 
 func (r *Reaper) SaveState(stateFile string) {
@@ -145,7 +157,7 @@ func allASGInstanceIds(as []AutoScalingGroup) map[string]map[string]bool {
 }
 
 // returns ASGs as filterables
-func allAutoScalingGroups(errc chan error, infoc chan string) []Filterable {
+func allAutoScalingGroups(cs reaperChannels) []Filterable {
 	regions := Conf.AWS.Regions
 
 	// waitgroup for goroutines
@@ -168,7 +180,7 @@ func allAutoScalingGroups(errc chan error, infoc chan string) []Filterable {
 			input := &autoscaling.DescribeAutoScalingGroupsInput{}
 			resp, err := api.DescribeAutoScalingGroups(input)
 			if err != nil {
-				errc <- err
+				cs.errCh <- err
 			}
 
 			for _, a := range resp.AutoScalingGroups {
@@ -176,11 +188,11 @@ func allAutoScalingGroups(errc chan error, infoc chan string) []Filterable {
 				in <- NewAutoScalingGroup(region, a)
 			}
 
-			infoc <- fmt.Sprintf("Found %d total AutoScalingGroups in %s", sum, region)
+			cs.infoCh <- fmt.Sprintf("Found %d total AutoScalingGroups in %s", sum, region)
 			for _, e := range Events {
 				go func(c chan error, e events.EventReporter) {
 					c <- e.NewStatistic("reaper.asgs.total", float64(len(in)), []string{fmt.Sprintf("region:%s", region)})
-				}(errc, e)
+				}(cs.errCh, e)
 			}
 		}(region)
 	}
@@ -198,13 +210,13 @@ func allAutoScalingGroups(errc chan error, infoc chan string) []Filterable {
 	// done with the channel
 	close(in)
 
-	infoc <- fmt.Sprintf("Found %d total ASGs.", len(autoScalingGroups))
+	cs.infoCh <- fmt.Sprintf("Found %d total ASGs.", len(autoScalingGroups))
 	return autoScalingGroups
 }
 
 func (r *Reaper) reapSnapshots(done chan bool) {
 	snapshots := allSnapshots()
-	Log.Info(fmt.Sprintf("Total snapshots: %d", len(snapshots)))
+	r.infoCh <- (fmt.Sprintf("Total snapshots: %d", len(snapshots)))
 	done <- true
 }
 
@@ -389,18 +401,18 @@ func allSecurityGroups() SecurityGroups {
 }
 
 func (r *Reaper) reap(done chan bool) {
-	filterables := allFilterables(r.errCh, r.infoCh)
+	filterables := allFilterables(r.reaperChannels)
 	// TODO: consider slice of pointers
 	var asgs []AutoScalingGroup
 	for _, f := range filterables {
 		switch t := f.(type) {
 		case *Instance:
-			reapInstance(t)
+			reapInstance(t, r.reaperChannels)
 		case *AutoScalingGroup:
-			reapAutoScalingGroup(t)
+			reapAutoScalingGroup(t, r.reaperChannels)
 			asgs = append(asgs, *t)
 		case *Snapshot:
-			reapSnapshot(t)
+			reapSnapshot(t, r.reaperChannels)
 		default:
 			r.errCh <- fmt.Errorf("Reap found unhandleable type.")
 		}
@@ -421,13 +433,13 @@ func (r *Reaper) reap(done chan bool) {
 
 // makes a slice of all filterables by appending
 // output of each filterable types aggregator function
-func allFilterables(errc chan error, infoc chan string) []Filterable {
+func allFilterables(cs reaperChannels) []Filterable {
 	var filterables []Filterable
 	if Conf.Enabled.Instances {
-		filterables = append(filterables, allInstances(errc, infoc)...)
+		filterables = append(filterables, allInstances(cs)...)
 	}
 	if Conf.Enabled.AutoScalingGroups {
-		filterables = append(filterables, allAutoScalingGroups(errc, infoc)...)
+		filterables = append(filterables, allAutoScalingGroups(cs)...)
 	}
 	if Conf.Enabled.Snapshots {
 		filterables = append(filterables, allSnapshots()...)
@@ -437,11 +449,11 @@ func allFilterables(errc chan error, infoc chan string) []Filterable {
 
 // applies N functions to a filterable F
 // returns true if all filters returned true, else returns false
-func applyFilters(f Filterable, filters map[string]Filter) bool {
+func applyFilters(f Filterable, filters map[string]Filter, cs reaperChannels) bool {
 	// recover from potential panics caused by malformed filters
 	defer func() {
 		if r := recover(); r != nil {
-			Log.Error(fmt.Sprintf("Recovered in applyFilters with panic: %s", r))
+			cs.errCh <- fmt.Errorf("Recovered in applyFilters with panic: %s", r)
 		}
 	}()
 
@@ -465,9 +477,9 @@ func applyFilters(f Filterable, filters map[string]Filter) bool {
 	return matched
 }
 
-func reapSnapshot(s *Snapshot) {
+func reapSnapshot(s *Snapshot, cs reaperChannels) {
 	filters := Conf.Filters.Snapshot
-	if applyFilters(s, filters) {
+	if applyFilters(s, filters, cs) {
 		Log.Debug(fmt.Sprintf("Snapshot %s matched %s.",
 			s.ID,
 			PrintFilters(filters)))
@@ -478,14 +490,14 @@ func reapSnapshot(s *Snapshot) {
 	}
 }
 
-func reapInstance(i *Instance) {
+func reapInstance(i *Instance, cs reaperChannels) {
 	filters := Conf.Filters.Instance
-	if applyFilters(i, filters) {
+	if applyFilters(i, filters, cs) {
 		ownerString := ""
 		if owner := i.Owner(); owner != nil {
 			ownerString = fmt.Sprintf("%s ", owner)
 		}
-		Log.Debug(fmt.Sprintf("Instance %s %sin region %s matched %s.",
+		cs.debugCh <- (fmt.Sprintf("Instance %s %sin region %s matched %s.",
 			i.ID,
 			ownerString,
 			i.Region,
@@ -523,10 +535,10 @@ func reapInstance(i *Instance) {
 	}
 }
 
-func reapAutoScalingGroup(a *AutoScalingGroup) {
+func reapAutoScalingGroup(a *AutoScalingGroup, cs reaperChannels) {
 	filters := Conf.Filters.ASG
-	if applyFilters(a, filters) {
-		Log.Debug(fmt.Sprintf("ASG %s matched %s.",
+	if applyFilters(a, filters, cs) {
+		cs.debugCh <- (fmt.Sprintf("ASG %s matched %s.",
 			a.ID,
 			PrintFilters(filters)))
 
@@ -540,7 +552,7 @@ func reapAutoScalingGroup(a *AutoScalingGroup) {
 }
 
 func (r *Reaper) terminateUnowned(i *Instance) error {
-	Log.Info("Terminate UNOWNED instance (%s) %s, owner tag: %s",
+	r.infoCh <- fmt.Sprintf("Terminate UNOWNED instance (%s) %s, owner tag: %s",
 		i.ID, i.Name, i.Tag("Owner"))
 
 	if Conf.DryRun {
@@ -549,7 +561,7 @@ func (r *Reaper) terminateUnowned(i *Instance) error {
 
 	// TODO: use success here
 	if _, err := i.Terminate(); err != nil {
-		Log.Error(fmt.Sprintf("Terminate %s error: %s", i.ID, err.Error()))
+		r.errCh <- fmt.Errorf("Terminate %s error: %s", i.ID, err.Error())
 		return err
 	}
 
@@ -620,7 +632,7 @@ func Stop(region, id string) error {
 // allInstances describes every instance in the requested regions
 // instances of Instance are created for each *ec2.Instance
 // returned as Filterables
-func allInstances(errc chan error, infoc chan string) []Filterable {
+func allInstances(cs reaperChannels) []Filterable {
 
 	regions := Conf.AWS.Regions
 	var wg sync.WaitGroup
@@ -630,7 +642,7 @@ func allInstances(errc chan error, infoc chan string) []Filterable {
 	for _, region := range regions {
 		wg.Add(1)
 
-		go func(region string, errc chan error, infoc chan string) {
+		go func(region string, cs reaperChannels) {
 			defer wg.Done()
 			api := ec2.New(&aws.Config{Region: region})
 
@@ -650,7 +662,7 @@ func allInstances(errc chan error, infoc chan string) []Filterable {
 				resp, err := api.DescribeInstances(input)
 				if err != nil {
 					// probably should do something here...
-					errc <- fmt.Errorf("EC2 error in %s: %s", region, err.Error())
+					cs.errCh <- fmt.Errorf("EC2 error in %s: %s", region, err.Error())
 					return
 				}
 
@@ -662,20 +674,21 @@ func allInstances(errc chan error, infoc chan string) []Filterable {
 				}
 
 				if resp.NextToken != nil {
-					infoc <- fmt.Sprintf("More results for DescribeInstances in %s", region)
+					cs.infoCh <- fmt.Sprintf("More results for DescribeInstances in %s", region)
 					nextToken = resp.NextToken
 				} else {
 					done = true
 				}
 			}
 
-			infoc <- fmt.Sprintf("Found %d total instances in %s", sum, region)
+			cs.infoCh <- fmt.Sprintf("Found %d total instances in %s", sum, region)
 			for _, e := range Events {
-				go func(c chan error, e events.EventReporter) {
-					c <- e.NewStatistic("reaper.instances.total", float64(sum), []string{fmt.Sprintf("region:%s", region)})
-				}(errc, e)
+				go func(cs reaperChannels, e events.EventReporter) {
+					// returns an error or nil
+					cs.errCh <- e.NewStatistic("reaper.instances.total", float64(sum), []string{fmt.Sprintf("region:%s", region)})
+				}(cs, e)
 			}
-		}(region, errc, infoc)
+		}(region, cs)
 	}
 
 	var list []Filterable
@@ -691,6 +704,6 @@ func allInstances(errc chan error, infoc chan string) []Filterable {
 	wg.Wait()
 	close(in)
 
-	infoc <- fmt.Sprintf("Found %d total instances.", len(list))
+	cs.infoCh <- fmt.Sprintf("Found %d total instances.", len(list))
 	return list
 }
